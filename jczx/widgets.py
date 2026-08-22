@@ -388,7 +388,7 @@ class DeviceBar(Horizontal):
         yield Static("", classes="device-bar-spacer")
         yield LabelButton("重载配置", id="config-reload-btn")
         if self._show_record:
-            yield LabelButton("记录", id="record-btn", style="black on yellow")
+            yield LabelButton("记录模式", id="record-btn", style="black on yellow")
 
     def on_label_button_pressed(self, event: LabelButton.Pressed) -> None:
         event.stop()

@@ -33,6 +33,25 @@ class TestRecorderLastSaved:
         assert rec.last_saved is None
 
 
+class TestEnsureDirCleanup:
+    """screenHistory 启动清理：数字截图与记录 JSON 一并清理，保留无关文件。"""
+
+    def test_cleans_numeric_png_and_record_json(self, tmp_path):
+        rec = DebugRecorder("annotated", str(tmp_path), logging.getLogger("record-test"))
+        (tmp_path / "1.png").write_bytes(b"x")
+        (tmp_path / "record_20260823_153000.json").write_text("{}", encoding="utf-8")
+        (tmp_path / "keep.txt").write_text("keep", encoding="utf-8")
+        rec.ensure_dir()
+        assert not (tmp_path / "1.png").exists(), "应删除数字命名截图"
+        assert not (tmp_path / "record_20260823_153000.json").exists(), "应删除记录 JSON"
+        assert (tmp_path / "keep.txt").exists(), "应保留无关文件"
+
+    def test_creates_dir_when_missing(self, tmp_path):
+        rec = DebugRecorder("annotated", str(tmp_path / "newdir"), logging.getLogger("record-test"))
+        rec.ensure_dir()
+        assert (tmp_path / "newdir").is_dir(), "目录不存在时应创建"
+
+
 class FakeRecordRecorder:
     """模拟 DebugRecorder：on_click/on_swipe 更新 last_saved。"""
 

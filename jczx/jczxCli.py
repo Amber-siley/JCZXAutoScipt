@@ -1319,7 +1319,7 @@ class JczxTUI(App, JczxCli):
     BINDINGS = [
         Binding("q", "quit", translate("退出程序", LANGUAGE)),
         Binding("ctrl+l", "clear_log", translate("清空日志", LANGUAGE)),
-        Binding("ctrl+shift+c", "copy_log", translate("复制日志", LANGUAGE)),
+        Binding("ctrl+o", "copy_log", translate("复制日志", LANGUAGE)),
     ]
     CSS_PATH = "Css\\main.tcss"
 
@@ -1360,7 +1360,7 @@ class JczxTUI(App, JczxCli):
         self.logger.debug("日志控制台已清空")
 
     def action_copy_log(self) -> None:
-        text = self.rich_log.render_str()
+        text = "\n".join(strip.text for strip in self.rich_log.lines)
         self.copy_to_clipboard(text)
         self.logger.debug("日志已复制到剪贴板")
 

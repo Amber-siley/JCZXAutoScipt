@@ -22,13 +22,14 @@ class DebugRecorder:
         self.last_saved: str | None = None   # 最近一次保存的截图文件名（记录窗口复用）
 
     _NUMERIC_PNG = re.compile(r"^\d+\.png$")
+    _RECORD_JSON = re.compile(r"^record_.*\.json$")
 
     def ensure_dir(self):
         if os.path.isdir(self._output_dir):
             for f in os.listdir(self._output_dir):
-                if self._NUMERIC_PNG.match(f):
+                if self._NUMERIC_PNG.match(f) or self._RECORD_JSON.match(f):
                     os.remove(os.path.join(self._output_dir, f))
-            self._log.debug(f"已清空调试截图目录 {self._output_dir}")
+            self._log.debug(f"已清空调试截图与记录目录 {self._output_dir}")
         else:
             os.makedirs(self._output_dir, exist_ok=True)
 
