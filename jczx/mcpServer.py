@@ -3,12 +3,16 @@
 服务随 TUI 启动在后台 daemon 线程运行，streamable-http 传输，
 agent 经 http://127.0.0.1:{port}/mcp 连接。
 """
+import json
 import logging
 import os
 
 import cv2
+import numpy as np
 from mcp.server import MCPServer
 from mcp.server.mcpserver.utilities.types import Image
+
+from jczx.configEntity import JczxSectionEntity
 
 
 class JczxMcpServer:
@@ -79,28 +83,34 @@ class JczxMcpServer:
         @self._mcp.tool()
         def run_entity(args: list[str]) -> str:
             """按 section 名称执行一个或多个实体（task/click/match/func/method/call 等），按列表顺序依次执行。
-
-常用实体（均可直接作为 args 元素）：
-- goto-home：返回主界面
-- click-center / click-upcenter：点击屏幕中心 / 中上部
-- wait-1 / wait-2 / wait-5：等待 1 / 2 / 5 秒
-- click-get-item：获取物品
-- auto-fight：自动战斗
-- emu：启动模拟器
-- launch-game：启动游戏
-- task-receive-everyday：领取每日礼包
-- task-receive-mail：领取邮件礼包
-- task-receive-dayAndWeek：领取常规任务奖励
-- task-receive-ExplorationGuidelines：领取勘探指南
-- task-get-ore：领取矿场矿物
-- task-delivery-order：自动交付订单
-- jjc-simulate：竞技场日常
-- goto-inllusion：虚影周本
-- task-favor：竞技场刷好感
-- screenshot-task：截图
-
-执行任务实体时无需关注中间过程：大多数任务实体会自行完成导航与操作，并在执行完成后自动返回主界面；直接执行即可。"""
+执行任务实体时无需关注中间过程：大多数任务实体（type: task）会自行完成导航与操作，并在执行完成后自动返回主界面；直接执行即可。"""
             return self._do_run_entity(*args)
+
+        @self._mcp.tool()
+        def reload_config() -> str:
+            """重新加载 TUI 的配置文件（Config.txt / MainMenu.txt / tasks/*.txt / Queues.txt），使 agent 修改或新增的任务/实体立即生效，无需重启 TUI。
+
+编辑任一配置文件后调用本工具即可让改动落地；再配合 run_entity 执行新定义的任务。"""
+            return self._do_reload_config()
+
+        @self._mcp.tool()
+        def run_entity_json(json_str: str) -> str:
+            """执行一段文本形式的实体：入参为 JSON 串，方法内解析为 Entity 实体（JczxSectionEntity）后直接执行，无需写入配置文件。
+
+入参示例（JSON 对象，字段与配置实体一致，action/target/args 等列表字段可用逗号字符串或数组）：
+- 点击登录图：{\"type\": \"click\", \"target\": \"buttons\\\\login.png\", \"max_wait\": 10}
+- 点击屏幕中点：{\"type\": \"func\", \"func\": \"click_proportion\", \"args\": \"2,2\"}
+- 组合执行（action 链引用的实体需已在配置池中）：{\"type\": \"task\", \"action\": \"goto-home,wait-1\"}
+
+返回值为实体执行结果（如 match 返回坐标对象、context 返回运算结果），失败时抛错。"""
+            return self._do_run_entity_json(json_str)
+
+        @self._mcp.tool()
+        def read_log_tail(lines: int = 50) -> str:
+            """读取 TUI 日志文件（debug 日志，写入工作区根目录的 JczxTUI.log / JczxCli.log）的最后 N 行，返回该日志文本。
+
+用于排查设备操作/任务事件时查看控制台未打印的 debug 日志。lines 为返回的最后行数（默认 50）。"""
+            return self._do_read_log_tail(lines)
 
     # ── 工具实现（可直接单测）──
 
@@ -118,7 +128,12 @@ class JczxMcpServer:
         self._logger.debug(f"MCP 工具调用 [click] target={target} per={per}")
         self._warn_if_busy("点击")
         path = self._resolve_target_path(target)
-        img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        # cv2.imread 在 Windows 上不支持中文/非 ASCII 路径，改 np.fromfile + imdecode
+        try:
+            data = np.fromfile(path, dtype=np.uint8)
+        except OSError:
+            raise RuntimeError(f"点击目标图片无法加载: {target}")
+        img = cv2.imdecode(data, cv2.IMREAD_GRAYSCALE)
         if img is None:
             raise RuntimeError(f"点击目标图片无法加载: {target}")
         centers = device.findImageCenterLocations(img, per=per)
@@ -193,8 +208,12 @@ class JczxMcpServer:
                 raise RuntimeError(f"裁切区域无效: ({x1},{y1})-({x2},{y2}) 超出画面 {w}x{h}")
             img = img[y1:y2, x1:x2]
         path = self._resolve_save_path(name)
-        if not cv2.imwrite(path, img):
-            raise RuntimeError(f"截图保存失败: {path}")
+        # cv2.imwrite 在 Windows 上不支持中文/非 ASCII 路径（乱码/失败），改 imencode + 文件写入
+        ok, buf = cv2.imencode(".png", img)
+        if not ok:
+            raise RuntimeError(f"截图 PNG 编码失败: {path}")
+        with open(path, "wb") as fp:
+            fp.write(buf.tobytes())
         self._logger.debug(f"MCP 工具调用 [save_screenshot] 完成 -> {path}")
         return f"截图已保存到 {path}"
 
@@ -228,6 +247,61 @@ class JczxMcpServer:
             device.exec(name)
         self._logger.debug(f"MCP 工具调用 [run_entity] 完成 -> {names}")
         return f"已执行实体: {', '.join(names)}"
+
+    def _do_reload_config(self) -> str:
+        self._logger.debug("MCP 工具调用 [reload_config]")
+        host = self._host
+        if host is None or not hasattr(host, "_reload_configs"):
+            raise RuntimeError("TUI 主机未就绪，无法重载配置")
+        host._reload_configs()
+        self._logger.debug("MCP 工具调用 [reload_config] 完成")
+        return "TUI 配置已重新加载，新任务/实体已生效"
+
+    def _do_run_entity_json(self, json_str: str) -> str:
+        device = self._device()
+        self._logger.debug(f"MCP 工具调用 [run_entity_json] json={json_str}")
+        self._warn_if_busy("执行实体(JSON)")
+        if not json_str or not isinstance(json_str, str):
+            raise RuntimeError(f"JSON 入参无效: {json_str!r}")
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"JSON 解析失败: {e}")
+        if not isinstance(data, dict) or "type" not in data:
+            raise RuntimeError("JSON 必须是含 type 字段的对象（实体定义）")
+        entity = JczxSectionEntity(**data)
+        self._logger.info(f"MCP 执行 JSON 实体 [{entity.get_task_name() or entity.only_key}] type={entity.type}")
+        result = device.exec(entity)
+        self._logger.debug(f"MCP 工具调用 [run_entity_json] 完成 -> {result!r}")
+        return f"已执行 JSON 实体 type={entity.type}, result={result!r}"
+
+    def _do_read_log_tail(self, lines: int = 50) -> str:
+        from collections import deque
+
+        self._logger.debug(f"MCP 工具调用 [read_log_tail] lines={lines}")
+        if not isinstance(lines, int) or lines <= 0:
+            raise RuntimeError(f"lines 必须为正整数: {lines!r}")
+        path = self._resolve_log_path()
+        if not os.path.isfile(path):
+            raise RuntimeError(f"日志文件不存在: {path}")
+        # deque(maxlen=N) 只保留最后 N 行，避免全量读入大日志文件
+        tail = deque(maxlen=lines)
+        with open(path, "r", encoding="utf-8", errors="replace") as fp:
+            for line in fp:
+                tail.append(line.rstrip("\n"))
+        result = "\n".join(tail)
+        self._logger.debug(f"MCP 工具调用 [read_log_tail] 完成 -> {len(tail)} 行, 文件 {path}")
+        return result
+
+    def _resolve_log_path(self) -> str:
+        """日志文件路径：host 显式提供 log_file 则用之，否则按程序根目录/<类名>.log 计算。"""
+        host = self._host
+        explicit = getattr(host, "log_file", None)
+        if explicit:
+            return explicit
+        program_dir = host._program_dir() if hasattr(host, "_program_dir") else os.getcwd()
+        class_name = host.__class__.__name__ if host is not None else "JczxCli"
+        return os.path.join(program_dir, f"{class_name}.log")
 
     # ── 辅助 ──
 

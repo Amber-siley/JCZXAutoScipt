@@ -79,22 +79,27 @@ sleep: 1
 [receive-eg-task-rewards]
 type: task
 name: 领取勘探奖励
-action: call-egtask-daily-around,click-EGRecive,get-item,call-egtask-week-around,click-EGRecive,get-item,call-egtask-month-around,click-EGRecive,get-item
+action: call-egtask-daily-around,call-egtask-week-around,call-egtask-month-around
+
+[egtask-around-receive]
+type: task
+name: 领取勘探奖励fn
+action: click-target,click-EGRecive,get-item,wait-1
 
 [call-egtask-daily-around]
 type: call
 fn: if-around-click
-args: base=buttons\EGDaily.png,base_per=0.9,expand_right=50
+args: base=buttons\EGDaily.png,base_per=0.9,expand_right=50,then_entity=egtask-around-receive
 
 [call-egtask-week-around]
 type: call
 fn: if-around-click
-args: base=buttons\EGWeek.png,base_per=0.9,expand_right=50
+args: base=buttons\EGWeek.png,base_per=0.9,expand_right=50,then_entity=egtask-around-receive
 
 [call-egtask-month-around]
 type: call
 fn: if-around-click
-args: base=buttons\EGMonth.png,base_per=0.9,expand_right=50
+args: base=buttons\EGMonth.png,base_per=0.9,expand_right=50,then_entity=egtask-around-receive
 
 [click-EGRecive]
 type: click

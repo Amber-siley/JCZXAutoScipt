@@ -32,13 +32,13 @@ def make_save_host(gaming, tmp_path):
 
 
 class TestToolRegistration:
-    def test_nine_tools_registered(self, gaming):
+    def test_tools_registered(self, gaming):
         server = JczxMcpServer(make_host(gaming), 8765, logging.getLogger("mcp-test"))
         names = {t.name for t in asyncio.run(server._mcp.list_tools())}
         assert names == {
             "screenshot", "click", "swipe", "drag",
             "get_resolution", "crop_screenshot", "save_screenshot", "get_screenshot_mode",
-            "run_entity",
+            "run_entity", "reload_config", "run_entity_json", "read_log_tail",
         }
 
 
@@ -295,6 +295,141 @@ class TestRunEntity:
             server._do_run_entity("click-a")
         assert any("MCP 工具调用 [run_entity]" in r.message for r in caplog.records)
         assert any("MCP 执行实体 [click-a]" in r.message for r in caplog.records)
+
+
+class TestRunEntityJson:
+    """run_entity_json：入参 JSON 串，方法内构建 JczxSectionEntity 后执行。"""
+
+    def test_parses_json_and_builds_entity(self, gaming):
+        server = JczxMcpServer(make_host(gaming), 8765, logging.getLogger("mcp-test"))
+        # func: context_set 会被引擎解析并在 _context 里写入变量，可验证实体真正被构建执行
+        result = server._do_run_entity_json(
+            '{"type": "func", "func": "context_set", "args": "json_key,jason_val"}'
+        )
+        assert "已执行 JSON 实体 type=func" in result
+        assert gaming._context.get("json_key") == "jason_val", "实体应被真实执行并写入上下文"
+
+    def test_invalid_json_raises(self, gaming):
+        server = JczxMcpServer(make_host(gaming), 8765, logging.getLogger("mcp-test"))
+        try:
+            server._do_run_entity_json("{not valid")
+            assert False, "应抛 JSON 解析失败"
+        except RuntimeError as e:
+            assert "JSON 解析失败" in str(e)
+
+    def test_missing_type_raises(self, gaming):
+        server = JczxMcpServer(make_host(gaming), 8765, logging.getLogger("mcp-test"))
+        try:
+            server._do_run_entity_json('{"target": "buttons/login.png"}')
+            assert False, "应抛缺少 type 字段"
+        except RuntimeError as e:
+            assert "必须是含 type 字段" in str(e)
+
+    def test_non_object_raises(self, gaming):
+        server = JczxMcpServer(make_host(gaming), 8765, logging.getLogger("mcp-test"))
+        try:
+            server._do_run_entity_json('["a", "b"]')
+            assert False, "应抛非对象"
+        except RuntimeError as e:
+            assert "必须是含 type 字段" in str(e)
+
+    def test_empty_or_non_string_raises(self, gaming):
+        server = JczxMcpServer(make_host(gaming), 8765, logging.getLogger("mcp-test"))
+        for bad in ("", None, 123):
+            try:
+                server._do_run_entity_json(bad)
+                assert False, f"应抛无效入参: {bad!r}"
+            except RuntimeError as e:
+                assert "JSON 入参无效" in str(e)
+
+    def test_click_entity_clicked_center(self, gaming, tmp_path):
+        import json
+        import cv2
+        import numpy as np
+        p = str(tmp_path / "btn.png")
+        cv2.imwrite(p, np.zeros((20, 20), np.uint8))
+        gaming.findImageCenterLocations = lambda img, per=0.8, cutPoints=None, grayScreenshot=None: [(30, 40)]
+        server = JczxMcpServer(make_host(gaming), 8765, logging.getLogger("mcp-test"))
+        # 用 json.dumps 保证 Windows 反斜杠路径被正确转义为合法 JSON
+        json_str = json.dumps({"type": "click", "target": p, "max_wait": 10})
+        result = server._do_run_entity_json(json_str)
+        assert "type=click" in result
+        assert gaming.clicks == [(30, 40)], "click 实体应点击匹配中心"
+
+    def test_run_entity_json_logs_debug(self, gaming, caplog):
+        server = JczxMcpServer(make_host(gaming), 8765, logging.getLogger("mcp-test"))
+        with caplog.at_level(logging.DEBUG, logger="mcp-test"):
+            server._do_run_entity_json(
+                '{"type": "func", "func": "context_set", "args": "k,v"}'
+            )
+        assert any("MCP 工具调用 [run_entity_json]" in r.message for r in caplog.records)
+        assert any("MCP 执行 JSON 实体" in r.message for r in caplog.records)
+
+
+class TestReadLogTail:
+    """read_log_tail：读取日志文件最后 N 行（host 提供 log_file 时用之）。"""
+
+    def _make_log_server(self, gaming, tmp_path, lines):
+        p = tmp_path / "JczxTUI.log"
+        p.write_text("\n".join(lines), encoding="utf-8")
+        host = SimpleNamespace(device=gaming, logger=logging.getLogger("mcp-test"),
+                               log_file=str(p))
+        return JczxMcpServer(host, 8765, logging.getLogger("mcp-test"))
+
+    def test_returns_last_n_lines(self, gaming, tmp_path):
+        server = self._make_log_server(gaming, tmp_path,
+                                       ["line1", "line2", "line3", "line4", "line5"])
+        result = server._do_read_log_tail(2)
+        assert result == "line4\nline5", "应返回最后 2 行"
+
+    def test_returns_all_when_n_ge_length(self, gaming, tmp_path):
+        server = self._make_log_server(gaming, tmp_path, ["a", "b"])
+        assert server._do_read_log_tail(100) == "a\nb"
+
+    def test_resolves_default_path_by_class_name(self, gaming, tmp_path):
+        log = tmp_path / "JczxTUI.log"
+        log.write_text("hello-log", encoding="utf-8")
+
+        class FakeTuiHost:
+            # 模拟 JczxTUI 实例：__name__ 固定为 JczxTUI，_program_dir 指向 tmp
+            device = gaming
+            logger = logging.getLogger("mcp-test")
+
+            @staticmethod
+            def _program_dir():
+                return str(tmp_path)
+
+        host = FakeTuiHost()
+        # __name__ 取的是类名 JczxTUI（此处类名是 FakeTuiHost），需手动覆盖供工具识别
+        host.__class__ = type("JczxTUI", (FakeTuiHost,), {})
+        server = JczxMcpServer(host, 8765, logging.getLogger("mcp-test"))
+        assert server._do_read_log_tail(10) == "hello-log"
+
+    def test_invalid_lines_raises(self, gaming, tmp_path):
+        server = self._make_log_server(gaming, tmp_path, ["x"])
+        for bad in (0, -5, 3.5, "10"):
+            try:
+                server._do_read_log_tail(bad)
+                assert False, f"应抛非法 lines: {bad!r}"
+            except RuntimeError as e:
+                assert "必须为正整数" in str(e)
+
+    def test_missing_file_raises(self, gaming):
+        host = SimpleNamespace(device=gaming, logger=logging.getLogger("mcp-test"),
+                               log_file="/no/such/file.log")
+        server = JczxMcpServer(host, 8765, logging.getLogger("mcp-test"))
+        try:
+            server._do_read_log_tail(5)
+            assert False, "应抛日志文件不存在"
+        except RuntimeError as e:
+            assert "日志文件不存在" in str(e)
+
+    def test_read_log_tail_logs_debug(self, gaming, tmp_path, caplog):
+        server = self._make_log_server(gaming, tmp_path, ["m1", "m2", "m3"])
+        with caplog.at_level(logging.DEBUG, logger="mcp-test"):
+            server._do_read_log_tail(2)
+        assert any("MCP 工具调用 [read_log_tail]" in r.message for r in caplog.records)
+        assert any("完成 -> 2 行" in r.message for r in caplog.records)
 
 
 class TestInitMcp:
