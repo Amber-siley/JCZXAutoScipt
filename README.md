@@ -4,6 +4,12 @@
 
 本项目使用 [uv](https://docs.astral.sh/uv/) 管理 Python 环境与依赖（`uv.lock` 锁定版本）。
 
+## 如何使用
+
+> 本章节为**预留**，用于后续打包发布 releases 后指导最终用户使用，内容将从用户（玩家）视角补充。
+
+（待发布后完善：如何安装、启动、连接模拟器、选择任务、开始自动化等面向玩家的操作指引。）
+
 ## 快速开始
 
 ```powershell
@@ -14,48 +20,40 @@ uv sync
 .\.venv\Scripts\activate
 
 # ③ 运行 Textual TUI（主入口）
-uv run python -m jczx.jczxCli
+uv run main.py
 # 或激活后直接：
-python -m jczx.jczxCli
+python main.py
 
-# 构建可执行文件（交互式选择 pyinstaller 或 nuitka）
+# 构建可执行文件（推荐 pyinstaller；nuitka 暂未验证）
 python build.py
 ```
 
-> **环境说明**：项目是 uv 管理环境，`uv sync` 会按 `pyproject.toml` 同步 `dependencies` 与 `[dependency-groups] dev`（pytest 等），并生成/复用 `.venv`。日常运行直接用 `uv run python -m jczx.jczxCli`，无需手动激活。
+> **环境说明**：项目是 uv 管理环境，`uv sync` 会按 `pyproject.toml` 同步 `dependencies` 与 `[dependency-groups] dev`（pytest 等），并生成/复用 `.venv`。日常运行直接用 `uv run main.py`，无需手动激活。
 
 ## 功能
 
 | 功能 | 说明 |
 |------|------|
 | 检测式启动游戏 | 自动启动游戏 App，首次启动自动签到 |
-| 自动交付订单 | 自定义订单类型，支持自动合成 |
 | 周本虚影微晶 | 阿瑞斯/宙斯虚影，支持预设队伍 |
 | 虚影刷好感 | 自定义队伍和次数 |
 | 竞技场挑战 | OCR 战力识别，可设置战力阈值 |
-| 矿场配队计算 | 计算配队方案得分 |
 | 驻员预设切换 | 工作成员心情耗尽时自动切换到心情正常的预设（method+call+index 逐设施） |
 
 ## 架构
 
 | 入口 | 命令 |
 |------|------|
-| TUI（推荐） | `python -m jczx.jczxCli` |
-| GUI（旧版） | `python jczx/jczx.py` |
+| TUI（推荐） | `uv run main.py` |
+| GUI（已日落） | `python jczx/jczx.py` |
 
-旧版 PyQt6 GUI 已不再维护，推荐使用新版 Textual TUI。
+旧版 PyQt6 GUI **已日落（不再维护）**，推荐使用新版 Textual TUI。
 
 ## 模拟器推荐
 
 雷电模拟器，开启 ADB 本地调试。MuMu 需开桥接模式。
 
 已测试分辨率：1920×1080 (dpi 280)、2400×1080 (dpi 320)。
-
-## 构造软链接（从仓库根目录运行时）
-
-```
-mklink /J resources jczx\resources
-```
 
 ## 配置文件
 
@@ -143,7 +141,7 @@ ffmpeg -start_number 1 -framerate 10 -i screenHistory/%d.png -c:v libx264 -pix_f
 |------|------|
 | `q` | 退出程序 |
 | `ctrl+l` | 清空日志控制台 |
-| `ctrl+shift+c` | 复制全部日志到剪贴板 |
+| `ctrl+o` | 复制日志信息 |
 
 ## 依赖
 
@@ -165,4 +163,4 @@ mcp[cli]>=2.0
 python build.py
 ```
 
-交互式选择 `pyinstaller`（快，包大）或 `nuitka`（慢，包小）。
+交互式选择打包方式。推荐 **`pyinstaller`**；**`nuitka` 暂未验证、不支持**，请使用 pyinstaller。
