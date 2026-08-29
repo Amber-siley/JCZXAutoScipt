@@ -1,0 +1,121 @@
+/ ============================================================
+/ 驻员预设自动切换（工作消耗→切到心情正常的预设）
+/ 逻辑（每个设施）：
+/   1. 点该设施的「驻员预设」按钮（click + index 区分设施）
+/   2. 打开预设弹窗后，match「工作中」文字 → action left-M|750 扩展到成员区
+/   3. near_location 在扩展区域内找红⊗(locations\Unhappy.png)
+/      - 有红⊗ → 点「使用」(buttons\switch.png) 切换到另一预设
+/      - 无红⊗ → click_proportion 9,2 点空白关闭弹窗
+/ 通用化：method + call，call 传入 index 逐设施切换。
+/ 模板由用户提供（agent 只用不裁）：buttons\buildingSwitch.png / buttons\EmployeeStatus.png /
+/   locations\InWorking.png / locations\Unhappy.png / buttons\switch.png / buttons\base.png
+/ ============================================================
+
+/ ---------- method：单个设施切换 ----------
+[rs-switch-facility]
+type: method
+name: 驻员预设-切换单个设施
+params: facility_index
+param_defaults: facility_index=0
+action: rs-click-facility,rs-match-inworking,rs-check-unhappy,rs-cond-switch
+
+/ ---------- call 调用（传 index，0=行星指挥部 1=能源发电站 2=挖掘矿场 3=原料交易所） ----------
+[call-staff-hq]
+type: call
+fn: rs-switch-facility
+args: facility_index=0
+
+[call-staff-energy]
+type: call
+fn: rs-switch-facility
+args: facility_index=1
+
+[call-staff-mine]
+type: call
+fn: rs-switch-facility
+args: facility_index=2
+
+[call-staff-trade]
+type: call
+fn: rs-switch-facility
+args: facility_index=3
+
+/ ---------- 入口 tasks ----------
+[task-get-ore-and-switch]
+type: task
+name: 领取矿物+切换驻员
+view: on
+action: goto-home,click-base,click-ore,get-item,wait-1,rs-task-all,goto-home
+
+[rs-task-all]
+type: task
+name: 驻员预设-全部切换
+action: rs-click-staff-status,call-staff-hq,call-staff-energy,call-staff-mine,call-staff-trade
+
+/ ---------- 进入基地 / 驻员状况 ----------
+[rs-click-base]
+type: click
+name: 基地
+target: buttons\base.png
+wait_target: buttons\EmployeeStatus.png
+max_wait: 10
+sleep: 2
+
+[rs-click-staff-status]
+type: click
+name: 驻员状况
+target: buttons\EmployeeStatus.png
+wait_target: locations\InWorking.png
+max_wait: 5
+sleep: 1
+
+/ ---------- 点第 facility_index 个「驻员预设」按钮 ----------
+[rs-click-facility]
+type: click
+name: 驻员预设
+match: rs-match-facility-btn
+index: %{facility_index}
+wait_target: locations\InWorking.png
+max_wait: 5
+sleep: 1
+
+[rs-match-facility-btn]
+type: match
+target: buttons\buildingSwitch.png
+per: 0.8
+
+/ ---------- 判定「工作中」那排是否有红⊗ ----------
+[rs-match-inworking]
+type: match
+target: locations\InWorking.png
+per: 0.8
+action: left-M|1000
+context_key: rs_inworking
+context_type: bool
+
+[rs-check-unhappy]
+type: func
+func: near_location
+target: locations\Unhappy.png
+args: rs-match-inworking,0.79
+context_key: rs_unhappy
+context_type: bool
+
+[rs-cond-switch]
+type: condition
+condition: &{%{rs_unhappy}}
+condition_then: rs-click-switch
+condition_else: rs-click-blank
+
+/ ---------- 结果动作 ----------
+[rs-click-switch]
+type: click
+name: 使用
+target: buttons\switch.png
+sleep: 1
+
+[rs-click-blank]
+type: func
+func: click_proportion
+args: 9,2
+sleep: 1

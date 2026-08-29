@@ -39,7 +39,67 @@ class TestToolRegistration:
             "screenshot", "click", "swipe", "drag",
             "get_resolution", "crop_screenshot", "save_screenshot", "get_screenshot_mode",
             "run_entity", "reload_config", "run_entity_json", "read_log_tail",
+            "save_template", "write_config", "register_file", "list_templates",
         }
+
+
+class TestResourceBasePath:
+    """路径基准统一到 resources/：相对路径经 fm 基于 <task_manage.fm.work_path>/resources/ 解析，绝对路径直接用。"""
+
+    def _host(self, gaming, root):
+        # 真实 MCP host 的 task_manage.fm.work_path = jczx 根目录；FakeFm(root) 模拟 jczx 根
+        return SimpleNamespace(device=gaming, logger=logging.getLogger("mcp-test"),
+                               task_manage=SimpleNamespace(fm=FakeFm(root)))
+
+    def test_resolve_target_relative_to_resources(self, gaming, tmp_path):
+        root = str(tmp_path)  # tmp_path 充当 jczx 根目录
+        server = JczxMcpServer(self._host(gaming, root), 8765, logging.getLogger("mcp-test"))
+        p = server._resolve_target_path("record\\staff_switch\\a.png")
+        assert p == str(tmp_path / "resources" / "record" / "staff_switch" / "a.png")
+
+    def test_resolve_target_absolute_used_directly(self, gaming, tmp_path):
+        abs_p = str(tmp_path / "abs.png")
+        server = JczxMcpServer(self._host(gaming, str(tmp_path)), 8765, logging.getLogger("mcp-test"))
+        assert server._resolve_target_path(abs_p) == abs_p
+
+
+class TestSaveTemplate:
+    """save_template：裁图直接落 resources/record/<purpose>/<name>.png，支持中文 purpose。"""
+
+    def _host(self, gaming, tmp_path):
+        # 真实 MCP host 的 task_manage.fm.work_path = jczx 根目录；此处 FakeFm(tmp_path) 模拟 jczx 根
+        return SimpleNamespace(device=gaming, logger=logging.getLogger("mcp-test"),
+                               task_manage=SimpleNamespace(fm=FakeFm(str(tmp_path))))
+
+    def test_saves_template_to_resources_record(self, gaming, tmp_path):
+        import cv2, numpy as np
+        img = np.arange(20 * 20 * 3, dtype=np.uint8).reshape(20, 20, 3)
+        gaming.screenshot = lambda: img
+        server = JczxMcpServer(self._host(gaming, tmp_path), 8765, logging.getLogger("mcp-test"))
+        result = server._do_save_template("click-1", "staff_switch", 5, 5, 10, 10)
+        p = tmp_path / "resources" / "record" / "staff_switch" / "click-1.png"
+        assert os.path.exists(p), f"应落盘到 {p}"
+        assert result["path"] == str(p)
+        assert result["width"] == 5 and result["height"] == 5
+
+    def test_chinese_purpose_path_ok(self, gaming, tmp_path):
+        import numpy as np
+        gaming.screenshot = lambda: np.zeros((20, 20, 3), np.uint8)
+        server = JczxMcpServer(self._host(gaming, tmp_path), 8765, logging.getLogger("mcp-test"))
+        result = server._do_save_template("t", "驻员切换", 0, 0, 8, 8)
+        p = tmp_path / "resources" / "record" / "驻员切换" / "t.png"
+        assert os.path.exists(p)
+        assert result["width"] == 8
+
+    def test_invalid_crop_raises(self, gaming, tmp_path):
+        import numpy as np
+        gaming.screenshot = lambda: np.zeros((20, 20, 3), np.uint8)
+        server = JczxMcpServer(self._host(gaming, tmp_path), 8765, logging.getLogger("mcp-test"))
+        try:
+            server._do_save_template("t", "x", 10, 10, 5, 5)
+            assert False, "应抛裁切区域无效"
+        except RuntimeError as e:
+            assert "裁切区域无效" in str(e)
 
 
 class TestDeviceOps:
@@ -364,6 +424,150 @@ class TestRunEntityJson:
             )
         assert any("MCP 工具调用 [run_entity_json]" in r.message for r in caplog.records)
         assert any("MCP 执行 JSON 实体" in r.message for r in caplog.records)
+
+
+class TestWriteConfig:
+    """write_config：复用 TxtConfig.set_config+save() 写任务文件，校验同名冲突与逗号空格。"""
+
+    def _host(self, gaming, tmp_path):
+        cfg_dir = tmp_path / "Config"
+        return SimpleNamespace(device=gaming, logger=logging.getLogger("mcp-test"),
+                               task_manage=SimpleNamespace(config_dir=str(cfg_dir)))
+
+    def test_writes_sections(self, gaming, tmp_path):
+        server = JczxMcpServer(self._host(gaming, tmp_path), 8765, logging.getLogger("mcp-test"))
+        sections = {
+            "task-a": {"type": "task", "name": "任务A", "action": "goto-home,click-x"},
+            "click-x": {"type": "click", "target": "record\\a\\x.png", "sleep": "1"},
+        }
+        result = server._do_write_config("record_a.txt", sections)
+        p = tmp_path / "Config" / "tasks" / "record_a.txt"
+        assert os.path.exists(p), f"应写入 {p}"
+        assert result["wrote"] == 2
+        # 重新读取验证
+        from jczx.CommonBuilder.CommonBuilder.FileTools.ConfigUtils import TxtConfig
+        cfg = TxtConfig(str(p))
+        assert cfg.get_config("task-a", "type") == "task"
+        assert cfg.get_config("task-a", "action") == "goto-home,click-x"
+        assert cfg.get_config("click-x", "target") == "record\\a\\x.png"
+
+    def test_dup_key_raises(self, gaming, tmp_path):
+        import os
+        from jczx.CommonBuilder.CommonBuilder.FileTools.ConfigUtils import TxtConfig
+        p = tmp_path / "Config" / "tasks" / "rec.txt"
+        os.makedirs(p.parent, exist_ok=True)
+        cfg = TxtConfig(str(p)); cfg.set_config("task-a", "type", "task"); cfg.save()
+        server = JczxMcpServer(self._host(gaming, tmp_path), 8765, logging.getLogger("mcp-test"))
+        try:
+            server._do_write_config("rec.txt", {"task-a": {"type": "click"}})
+            assert False, "应抛同名冲突"
+        except RuntimeError as e:
+            assert "同名" in str(e) or "冲突" in str(e)
+
+    def test_comma_space_raises(self, gaming, tmp_path):
+        server = JczxMcpServer(self._host(gaming, tmp_path), 8765, logging.getLogger("mcp-test"))
+        try:
+            server._do_write_config("rec.txt", {"t": {"action": "goto-home, click-x"}})
+            assert False, "应抛逗号后空格"
+        except RuntimeError as e:
+            assert "逗号" in str(e)
+
+
+class TestRegisterFile:
+    """register_file：在 MainMenu 写入 type:file 注册，重复 key 报错。"""
+
+    def _host(self, gaming, tmp_path):
+        from jczx.CommonBuilder.CommonBuilder.FileTools.ConfigUtils import TxtConfig
+        cfg_dir = tmp_path / "Config"
+        menu_path = cfg_dir / "MainMenu.txt"
+        os.makedirs(cfg_dir, exist_ok=True)
+        mm = TxtConfig(str(menu_path))
+        mm.set_config("goto-home", "type", "task"); mm.save()
+        tm = SimpleNamespace(menu_config=mm, menu_config_path=str(menu_path), config_dir=str(cfg_dir))
+        return SimpleNamespace(device=gaming, logger=logging.getLogger("mcp-test"),
+                               fm=FakeFm(str(tmp_path)), task_manage=tm)
+
+    def test_registers_file(self, gaming, tmp_path):
+        server = JczxMcpServer(self._host(gaming, tmp_path), 8765, logging.getLogger("mcp-test"))
+        result = server._do_register_file("file-record-a", "tasks\\record_a.txt", "记录A")
+        assert result["key"] == "file-record-a"
+        mm = server._host.task_manage.menu_config
+        assert mm.get_config("file-record-a", "type") == "file"
+        assert mm.get_config("file-record-a", "target") == "tasks\\record_a.txt"
+        assert mm.get_config("file-record-a", "name") == "记录A"
+
+    def test_dup_key_raises(self, gaming, tmp_path):
+        server = JczxMcpServer(self._host(gaming, tmp_path), 8765, logging.getLogger("mcp-test"))
+        server._do_register_file("file-record-a", "tasks\\a.txt", "A")
+        try:
+            server._do_register_file("file-record-a", "tasks\\b.txt", "B")
+            assert False, "应抛重复 key"
+        except RuntimeError as e:
+            assert "重复" in str(e) or "已存在" in str(e)
+
+    def test_registers_without_polluting_merged_externals(self, gaming, tmp_path):
+        """内存 menu_config 已 merge 外部 task 文件段时，register_file 不得把外部段写回 MainMenu（防污染）。
+
+        回归锁定：_do_register_file 用磁盘干净实例写入，避免直接 save() 把外部段序列化进 MainMenu.txt。
+        """
+        from jczx.CommonBuilder.CommonBuilder.FileTools.ConfigUtils import TxtConfig
+        cfg_dir = tmp_path / "Config"
+        menu_path = cfg_dir / "MainMenu.txt"
+        os.makedirs(cfg_dir, exist_ok=True)
+        # 磁盘上的 MainMenu 是干净的
+        disk_mm = TxtConfig(str(menu_path))
+        disk_mm.set_config("goto-home", "type", "task"); disk_mm.save()
+        # 内存 menu_config 模拟运行时已 merge 外部段（如 jjc-thumb）
+        mm = TxtConfig(str(menu_path))
+        ext_path = cfg_dir / "tasks" / "jjc.txt"
+        os.makedirs(ext_path.parent, exist_ok=True)
+        ext = TxtConfig(str(ext_path))
+        ext.set_config("jjc-thumb", "type", "click"); ext.save()
+        mm.merge(ext)
+        tm = SimpleNamespace(menu_config=mm, menu_config_path=str(menu_path), config_dir=str(cfg_dir))
+        host = SimpleNamespace(device=gaming, logger=logging.getLogger("mcp-test"),
+                               fm=FakeFm(str(tmp_path)), task_manage=tm)
+        server = JczxMcpServer(host, 8765, logging.getLogger("mcp-test"))
+        server._do_register_file("file-record-a", "tasks\\record_a.txt", "记录A")
+        # 从磁盘重新读，断言：不含外部段 jjc-thumb，只含本 key 与 goto-home
+        reloaded = TxtConfig(str(menu_path))
+        assert "jjc-thumb" not in reloaded.sections(), "register_file 不得把已 merge 的外部段写回 MainMenu"
+        assert reloaded.get_config("file-record-a", "type") == "file"
+        assert reloaded.get_config("file-record-a", "target") == "tasks\\record_a.txt"
+        assert reloaded.get_config("file-record-a", "name") == "记录A"
+
+
+class TestListTemplates:
+    """list_templates：列 resources/record/<purpose>/ 下的 png 模板，支持 %substr% 模糊匹配。"""
+
+    def _host(self, gaming, tmp_path):
+        return SimpleNamespace(device=gaming, logger=logging.getLogger("mcp-test"),
+                               task_manage=SimpleNamespace(fm=FakeFm(str(tmp_path))))
+
+    def _make_dir(self, tmp_path, purpose, files):
+        d = tmp_path / "resources" / "record" / purpose
+        d.mkdir(parents=True, exist_ok=True)
+        for f in files:
+            (d / f).write_bytes(b"fake-png")
+        return d
+
+    def test_lists_all_png(self, gaming, tmp_path):
+        self._make_dir(tmp_path, "sw", ["click-1.png", "click-2.png", "readme.txt", "x.png"])
+        server = JczxMcpServer(self._host(gaming, tmp_path), 8765, logging.getLogger("mcp-test"))
+        result = server._do_list_templates("sw")
+        assert set(result["templates"]) == {"click-1.png", "click-2.png", "x.png"}, "应只列 png"
+
+    def test_fuzzy_match_substr(self, gaming, tmp_path):
+        self._make_dir(tmp_path, "sw", ["staff_preset_hq.png", "staff_preset_ene.png", "base.png"])
+        server = JczxMcpServer(self._host(gaming, tmp_path), 8765, logging.getLogger("mcp-test"))
+        result = server._do_list_templates("sw", pattern="%staff_preset%")
+        assert set(result["templates"]) == {"staff_preset_hq.png", "staff_preset_ene.png"}
+
+    def test_missing_dir_returns_empty(self, gaming, tmp_path):
+        server = JczxMcpServer(self._host(gaming, tmp_path), 8765, logging.getLogger("mcp-test"))
+        result = server._do_list_templates("nosuch")
+        assert result["templates"] == [], "目录不存在应返回空列表而非抛错"
+        assert result["directory"].endswith("nosuch")
 
 
 class TestReadLogTail:

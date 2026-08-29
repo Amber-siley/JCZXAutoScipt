@@ -76,6 +76,12 @@ class JczxMcpServer:
             return self._do_save_screenshot(name, x1, y1, x2, y2)
 
         @self._mcp.tool()
+        def save_template(name: str, purpose: str, x1: int, y1: int, x2: int, y2: int) -> dict:
+            """从当前设备画面裁出 (x1,y1)-(x2,y2) 区域，保存为模板到 jczx/resources/record/<purpose>/<name>.png。
+            之后配置实体 target 可直接用 record\\<purpose>\\<name>.png 引用。name 不含扩展名。"""
+            return self._do_save_template(name, purpose, x1, y1, x2, y2)
+
+        @self._mcp.tool()
         def get_screenshot_mode() -> str:
             """获取当前 TUI 截图模式（off=关闭 / simple=连续截图 / annotated=标注截图）。"""
             return self._do_get_screenshot_mode()
@@ -106,11 +112,33 @@ class JczxMcpServer:
             return self._do_run_entity_json(json_str)
 
         @self._mcp.tool()
+        def write_config(file: str, sections: dict) -> dict:
+            """把一组 section 定义写入 jczx/Config/tasks/<file>（.txt 配置），复用 TxtConfig.set_config+save()。
+sections 形如 {"task-a": {"type": "task", "name": "任务A", "action": "goto-home,click-x"}}。
+自动校验：同名 section 冲突、字段值含逗号后空格会报错。写入后需调 reload_config 生效。"""
+            return self._do_write_config(file, sections)
+
+        @self._mcp.tool()
+        def register_file(key: str, target: str, name: str) -> dict:
+            """在 jczx/Config/MainMenu.txt 追加一个 type:file 注册，把任务文件挂进公共实体池。
+key 为 section 名（如 file-record-a），target 相对 Config 目录（如 tasks\\record_a.txt），name 为中文显示名。
+重复 key 会报错。写入后需调 reload_config 生效。"""
+            return self._do_register_file(key, target, name)
+
+        @self._mcp.tool()
         def read_log_tail(lines: int = 50) -> str:
             """读取 TUI 日志文件（debug 日志，写入工作区根目录的 JczxTUI.log / JczxCli.log）的最后 N 行，返回该日志文本。
 
 用于排查设备操作/任务事件时查看控制台未打印的 debug 日志。lines 为返回的最后行数（默认 50）。"""
             return self._do_read_log_tail(lines)
+
+        @self._mcp.tool()
+        def list_templates(purpose: str, pattern: str | None = None) -> dict:
+            """列出 jczx/resources/record/<purpose>/ 目录下的 .png 模板文件。
+
+pattern 为可选模糊匹配（默认不传列出全部）；传如 \"%staff_preset%\" 则只返回文件名含该子串的模板。
+用于写配置前确认用户已提供哪些模板、缺哪些。目录不存在返回空列表。"""
+            return self._do_list_templates(purpose, pattern)
 
     # ── 工具实现（可直接单测）──
 
@@ -145,11 +173,18 @@ class JczxMcpServer:
         return f"已点击目标 {target} 中心 ({cx}, {cy})"
 
     def _resolve_target_path(self, target: str) -> str:
-        """解析点击目标图片路径：绝对路径直接用，相对路径经 fm 基于 work_path 解析。"""
+        """解析点击目标图片路径：绝对路径直接用；相对路径经 host.task_manage.fm 基于 <work_path>/resources/ 解析（与 config target 基准一致）。
+
+        已实测：host.task_manage.fm.work_path = <项目>/jczx，join_p("resources",...) → <项目>/jczx/resources/...。
+        """
         if os.path.isabs(target):
             return target
-        fm = getattr(self._host, "fm", None)
-        return fm.join_p(target) if fm is not None else os.path.join(os.getcwd(), target)
+        tm = getattr(self._host, "task_manage", None)
+        fm = getattr(tm, "fm", None)
+        if fm is None:
+            return os.path.join(os.getcwd(), "jczx", "resources", target)
+        rel = ["resources"] + target.replace("/", "\\").split("\\")
+        return fm.join_p(*rel)
 
     def _do_swipe(self, x1, y1, x2, y2, duration=200) -> str:
         device = self._device()
@@ -224,6 +259,62 @@ class JczxMcpServer:
         os.makedirs(base, exist_ok=True)
         return os.path.join(base, f"{name}.png")
 
+    def _do_save_template(self, name, purpose, x1, y1, x2, y2) -> dict:
+        device = self._device()
+        self._logger.debug(f"MCP 工具调用 [save_template] name={name} purpose={purpose} crop=({x1},{y1})-({x2},{y2})")
+        img = device.screenshot()
+        h, w = img.shape[:2]
+        x1 = max(int(x1), 0); y1 = max(int(y1), 0)
+        x2 = min(int(x2), w); y2 = min(int(y2), h)
+        if x2 <= x1 or y2 <= y1:
+            raise RuntimeError(f"裁切区域无效: ({x1},{y1})-({x2},{y2}) 超出画面 {w}x{h}")
+        crop = img[y1:y2, x1:x2]
+        path = self._resolve_record_path(name, purpose)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        ok, buf = cv2.imencode(".png", crop)
+        if not ok:
+            raise RuntimeError(f"截图 PNG 编码失败: {path}")
+        with open(path, "wb") as fp:
+            fp.write(buf.tobytes())
+        self._logger.debug(f"MCP 工具调用 [save_template] 完成 -> {path} ({x2-x1}x{y2-y1})")
+        return {"path": path, "width": x2 - x1, "height": y2 - y1}
+
+    def _resolve_record_path(self, name: str, purpose: str) -> str:
+        """模板落盘到 <task_manage.fm.work_path>/resources/record/<purpose>/<name>.png。
+
+        真实 host.task_manage.fm.work_path = jczx 根目录，join_p("resources","record",...) → <jczx>/resources/record/...。
+        """
+        tm = getattr(self._host, "task_manage", None)
+        fm = getattr(tm, "fm", None)
+        if fm is None:
+            return os.path.join(os.getcwd(), "jczx", "resources", "record", purpose, f"{name}.png")
+        rel = ["resources", "record", purpose, f"{name}.png"]
+        return fm.join_p(*rel)
+
+    def _do_list_templates(self, purpose: str, pattern: str = None) -> dict:
+        self._logger.debug(f"MCP 工具调用 [list_templates] purpose={purpose} pattern={pattern}")
+        d = self._resolve_record_dir(purpose)
+        templates = []
+        if os.path.isdir(d):
+            for name in sorted(os.listdir(d)):
+                if not name.lower().endswith(".png"):
+                    continue
+                if pattern:
+                    needle = pattern.strip("%")
+                    if needle and needle not in name:
+                        continue
+                templates.append(name)
+        self._logger.debug(f"MCP 工具调用 [list_templates] 完成 -> {len(templates)} 个模板 in {d}")
+        return {"purpose": purpose, "directory": d, "templates": templates}
+
+    def _resolve_record_dir(self, purpose: str) -> str:
+        """模板目录 = <task_manage.fm.work_path>/resources/record/<purpose>。"""
+        tm = getattr(self._host, "task_manage", None)
+        fm = getattr(tm, "fm", None)
+        if fm is None:
+            return os.path.join(os.getcwd(), "jczx", "resources", "record", purpose)
+        return fm.join_p("resources", "record", purpose)
+
     def _do_get_screenshot_mode(self) -> str:
         self._logger.debug("MCP 工具调用 [get_screenshot_mode]")
         config = getattr(self._host, "config", None)
@@ -274,6 +365,61 @@ class JczxMcpServer:
         result = device.exec(entity)
         self._logger.debug(f"MCP 工具调用 [run_entity_json] 完成 -> {result!r}")
         return f"已执行 JSON 实体 type={entity.type}, result={result!r}"
+
+    def _do_write_config(self, file: str, sections: dict) -> dict:
+        import re
+        host = self._host
+        self._logger.debug(f"MCP 工具调用 [write_config] file={file} sections={list(sections)}")
+        cfg_dir = getattr(getattr(host, "task_manage", None), "config_dir", None)
+        if not cfg_dir:
+            raise RuntimeError("TUI 主机未就绪，无法写入配置（task_manage.config_dir 为空）")
+        from jczx.CommonBuilder.CommonBuilder.FileTools.ConfigUtils import TxtConfig
+        path = os.path.join(cfg_dir, "tasks", file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        cfg = TxtConfig(path)
+        for key, fields in sections.items():
+            try:
+                existing = cfg.get_config(key, "type")
+                if existing:
+                    raise RuntimeError(f"同名 section 冲突: {key} 已存在")
+            except KeyError:
+                pass
+            for field, value in fields.items():
+                sv = str(value)
+                if "," in sv and re.search(r",\s", sv):
+                    raise RuntimeError(f"字段 {key}.{field} 值含逗号后空格（configEntity 按逗号拆分会出错）: {sv!r}")
+                cfg.set_config(key, field, sv)
+        cfg.save()
+        self._logger.debug(f"MCP 工具调用 [write_config] 完成 -> {path} ({len(sections)} sections)")
+        return {"path": path, "wrote": len(sections)}
+
+    def _do_register_file(self, key: str, target: str, name: str) -> dict:
+        host = self._host
+        self._logger.debug(f"MCP 工具调用 [register_file] key={key} target={target} name={name}")
+        tm = getattr(host, "task_manage", None)
+        menu = getattr(tm, "menu_config", None)
+        path = getattr(tm, "menu_config_path", None)
+        if menu is None or not path:
+            raise RuntimeError("TUI 主机未就绪，无法注册（task_manage.menu_config/menu_config_path 为空）")
+        # 注意：menu_config 是运行时已 merge 过外部 task 文件段的内存对象，直接 save() 会把外部段
+        # 一并写回 MainMenu（污染）。这里从磁盘重新加载干净的 MainMenu 实例做注册写入，只写本 key 三行。
+        from jczx.CommonBuilder.CommonBuilder.FileTools.ConfigUtils import TxtConfig
+        try:
+            cfg = TxtConfig(path)
+            existing = cfg.get_config(key, "type")
+            raise RuntimeError(f"重复注册: key {key} 已存在 (type={existing})")
+        except KeyError:
+            pass
+        cfg.set_config(key, "type", "file")
+        cfg.set_config(key, "target", target)
+        cfg.set_config(key, "name", name)
+        cfg.save()
+        # 同步内存里的 menu_config，便于 ${...} 占位符即时解析（不 save，避免污染）
+        menu.set_config(key, "type", "file")
+        menu.set_config(key, "target", target)
+        menu.set_config(key, "name", name)
+        self._logger.debug(f"MCP 工具调用 [register_file] 完成 -> {path}")
+        return {"path": path, "key": key}
 
     def _do_read_log_tail(self, lines: int = 50) -> str:
         from collections import deque

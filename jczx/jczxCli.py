@@ -598,14 +598,14 @@ class JCZXGaming(Device):
                         target = self._resolver.resolve(e.target, e.only_key)
                         cascade_result = self._cascade_match(mt, target, self._resolve_scalar(e, "per"))
                         if cascade_result and cascade_result.matchTempleteCenterPoints:
-                            idx = e.index
+                            idx = self._resolve_scalar(e, "index")
                             pts = cascade_result.matchTempleteCenterPoints
                             pt = pts[idx] if idx < len(pts) else pts[0]
                             self.click(*pt)
                             result = mt
                     else:
                         if mt.matchTempleteCenterPoints:
-                            idx = e.index
+                            idx = self._resolve_scalar(e, "index")
                             pt = mt.matchTempleteCenterPoints[idx] if idx < len(mt.matchTempleteCenterPoints) else mt.matchTempleteCenterPoints[0]
                             self.click(*pt)
                         result = mt

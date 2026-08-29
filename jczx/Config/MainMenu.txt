@@ -447,3 +447,8 @@ name: 领取各种东西
 type: file
 target: tasks\Construction.txt
 name: 基建相关
+
+[file-record-staff-switch]
+type: file
+target: tasks\staff_switch_auto.txt
+name: 驻员预设-自动切换

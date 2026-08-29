@@ -40,12 +40,6 @@ setting-delivery-orders__sub:16-2构建,8-1构建,6-1构建
 setting-delivery-synth:true
 setting-delivery-check-friend:true
 
-[task-get-ore]
-type: task
-name: 领取矿场矿物
-view: on
-action: goto-home,click-base,click-ore,get-item,goto-home
-
 / 通用
 [get-item]
 extend: condition-to-get-item
